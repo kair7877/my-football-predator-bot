@@ -363,38 +363,60 @@ class BankrollManager:
 
 
 class SofaFetcher:
-    API = "https://api.sofascore.com/api/v1"
+    ENDPOINTS = [
+        "https://www.sofascore.com/api/v1",
+        "https://api.sofascore.com/api/v1"
+    ]
 
     def __init__(self):
-        self.sc = cloudscraper.create_scraper()
+        self._init_scraper()
+        self.last_req = 0.0
+
+    def _init_scraper(self):
+        try:
+            self.sc = cloudscraper.create_scraper(
+                browser={
+                    'browser': 'chrome',
+                    'platform': 'windows',
+                    'desktop': True
+                }
+            )
+        except Exception:
+            self.sc = requests.Session()
+
         self.sc.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
             "Referer": "https://www.sofascore.com/",
             "Origin": "https://www.sofascore.com",
-            "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+            "Sec-Ch-Ua": '"Chromium";v="124", "Not-A.Brand";v="99", "Google Chrome";v="124"',
             "Sec-Ch-Ua-Mobile": "?0",
             "Sec-Ch-Ua-Platform": '"Windows"',
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "Cache-Control": "no-cache",
         })
-        self.last_req = 0.0
 
     def _wait(self):
-        if time.time() - self.last_req < 0.6:
-            time.sleep(0.6)
+        if time.time() - self.last_req < 1.0:
+            time.sleep(1.0)
         self.last_req = time.time()
 
     def _get(self, ep):
         self._wait()
-        try:
-            r = self.sc.get(f"{self.API}/{ep}", timeout=12)
-            if r.status_code == 200:
-                return r.json()
-            elif r.status_code == 403:
-                print(f"[!] SofaScore API 403 Forbidden on {ep}. Обход через задержку...")
-            return None
-        except Exception:
-            return None
+        for base_url in self.ENDPOINTS:
+            try:
+                r = self.sc.get(f"{base_url}/{ep}", timeout=12)
+                if r.status_code == 200:
+                    return r.json()
+                elif r.status_code in (403, 429):
+                    self._init_scraper()
+                    time.sleep(1.5)
+            except Exception:
+                pass
+        return None
 
     def get_live_matches(self):
         res = self._get("sport/football/events/live")
