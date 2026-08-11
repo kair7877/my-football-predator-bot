@@ -56,7 +56,7 @@ def start_dummy_server():
 class Config:
     VERSION = "30.12 [PRO LEAGUES]"
     BOT_TOKEN = "7877159131:AAGrC_QlzSvKO1n_AFkJlMY7-UXTx_1l590"
-    CHAT_ID = "-1004290840012"
+    CHAT_ID = "-1002049182734"
     CHECK_INTERVAL = 60             # Проверка каждые 60 сек
     BANKROLL_START = 1000
     FLAT_STAKE = 100
@@ -369,29 +369,40 @@ class SofaFetcher:
     ]
 
     def __init__(self):
-        self._init_scraper()
+        self.fail_count = 0
+        self._init_scraper(self.fail_count)
         self.last_req = 0.0
 
-    def _init_scraper(self):
+    def _init_scraper(self, try_count=0):
+        browsers = [
+            {'browser': 'chrome', 'platform': 'windows', 'desktop': True},
+            {'browser': 'firefox', 'platform': 'windows', 'desktop': True},
+            {'browser': 'chrome', 'platform': 'android', 'mobile': True},
+        ]
+        b_config = browsers[try_count % len(browsers)]
         try:
             self.sc = cloudscraper.create_scraper(
-                browser={
-                    'browser': 'chrome',
-                    'platform': 'windows',
-                    'desktop': True
-                }
+                browser=b_config,
+                delay=3
             )
         except Exception:
             self.sc = requests.Session()
 
+        ua_list = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+        ]
+        ua = ua_list[try_count % len(ua_list)]
+
         self.sc.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "User-Agent": ua,
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
             "Referer": "https://www.sofascore.com/",
             "Origin": "https://www.sofascore.com",
             "Sec-Ch-Ua": '"Chromium";v="124", "Not-A.Brand";v="99", "Google Chrome";v="124"',
-            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Mobile": "?0" if not b_config.get("mobile") else "?1",
             "Sec-Ch-Ua-Platform": '"Windows"',
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
@@ -412,8 +423,9 @@ class SofaFetcher:
                 if r.status_code == 200:
                     return r.json()
                 elif r.status_code in (403, 429):
-                    self._init_scraper()
-                    time.sleep(1.5)
+                    self.fail_count += 1
+                    self._init_scraper(self.fail_count)
+                    time.sleep(2.0)
             except Exception:
                 pass
         return None
