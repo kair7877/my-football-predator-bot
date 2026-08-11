@@ -16,11 +16,15 @@ from datetime import datetime, date
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
+# Вывод логов без задержек (Unbuffered output)
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(line_buffering=True)
+
 try:
     import cloudscraper
 except ImportError:
-    print("❌ Ошибка: Не установлена библиотека cloudscraper.")
-    print("Установите через терминал: pip install cloudscraper requests aiohttp")
+    print("❌ Ошибка: Не установлена библиотека cloudscraper.", flush=True)
+    print("Установите через терминал: pip install cloudscraper requests aiohttp", flush=True)
     sys.exit(1)
 
 
@@ -43,7 +47,7 @@ def start_dummy_server():
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    print(f"🌐 [Render Health Server] Веб-сервер запущен на порту {port}")
+    print(f"🌐 [Render Health Server] Веб-сервер запущен на порту {port}", flush=True)
 
 
 # =====================================================
@@ -411,12 +415,17 @@ class TelegramNotifier:
 
     def _post(self, method: str, payload: Dict):
         try:
-            return requests.post(f"{self.base}/{method}", json=payload, timeout=10).json()
+            res = requests.post(f"{self.base}/{method}", json=payload, timeout=10).json()
+            if not res.get("ok"):
+                print(cl(f"❌ Telegram API Error ({method}): {res.get('description', res)}", "RE"), flush=True)
+            return res
         except Exception as e:
+            print(cl(f"❌ Telegram Request Exception ({method}): {e}", "RE"), flush=True)
             return {"ok": False, "description": str(e)}
 
     def test_and_notify(self):
         strategies_txt = "\n".join(f"  {s.emoji} {s.name}" for s in STRATEGIES)
+        print(cl(f"📤 Попытка отправки приветствия в Telegram (CHAT_ID={self.chat_id})...", "CY"), flush=True)
         resp = self._post("sendMessage", {
             "chat_id": self.chat_id, "parse_mode": "HTML",
             "text": (f"🤖 <b>PREDATOR ZETA v{Config.VERSION} ЗАПУЩЕН НА СЕРВЕРЕ!</b>\n"
@@ -425,7 +434,12 @@ class TelegramNotifier:
                      f"<b>Активные стратегии:</b>\n{strategies_txt}\n\n"
                      f"🔍 <i>Начинаю непрерывный сканинг Live-матчей...</i>")
         })
-        return resp.get("ok", False)
+        ok = resp.get("ok", False)
+        if ok:
+            print(cl("✅ Сообщение успешно доставлено в Telegram!", "GR"), flush=True)
+        else:
+            print(cl(f"⚠️ Ошибка доставки в Telegram: {resp.get('description', 'Неизвестная ошибка')}", "YE"), flush=True)
+        return ok
 
     def send_signal(self, strategy: BaseStrategy, info: dict, signal: dict, match_id: str) -> int:
         url = f"https://www.sofascore.com/event/{match_id}"
@@ -470,11 +484,11 @@ class LiveMonitor:
     def run(self):
         start_dummy_server()
         if not self.tg.test_and_notify():
-            print(cl("\n[!] Внимание: Сообщение в Telegram не отправлено. Проверьте BOT_TOKEN и CHAT_ID.", "YE"))
+            print(cl("\n[!] Внимание: Сообщение в Telegram не отправлено. Проверьте BOT_TOKEN и CHAT_ID.", "YE"), flush=True)
 
-        print(cl("\n==================================================", "CY"))
-        print(cl(f"   PREDATOR ZETA v{Config.VERSION} ЗАПУЩЕН", "GR"))
-        print(cl("==================================================\n", "CY"))
+        print(cl("\n==================================================", "CY"), flush=True)
+        print(cl(f"   PREDATOR ZETA v{Config.VERSION} ЗАПУЩЕН", "GR"), flush=True)
+        print(cl("==================================================\n", "CY"), flush=True)
 
         while True:
             try:
@@ -482,19 +496,19 @@ class LiveMonitor:
                 self._run_cycle()
                 time.sleep(Config.CHECK_INTERVAL)
             except KeyboardInterrupt:
-                print("Остановка по команде пользователя.")
+                print("Остановка по команде пользователя.", flush=True)
                 break
             except Exception as e:
-                print(cl(f"[CRITICAL ERROR] {e}", "RE"))
+                print(cl(f"[CRITICAL ERROR] {e}", "RE"), flush=True)
                 time.sleep(10)
 
     def _run_cycle(self):
         matches = self.fetcher.get_live_matches()
         if not matches:
-            print(cl(f"[{datetime.now().strftime('%H:%M:%S')}] 💤 Live матчей нет или временно заблокировано...", "YE"))
+            print(cl(f"[{datetime.now().strftime('%H:%M:%S')}] 💤 Live матчей нет или временно заблокировано...", "YE"), flush=True)
             return
 
-        print(cl(f"[{datetime.now().strftime('%H:%M:%S')}] ⚡ Сканируем Live матчей: {len(matches)}", "CY"))
+        print(cl(f"[{datetime.now().strftime('%H:%M:%S')}] ⚡ Сканируем Live матчей: {len(matches)}", "CY"), flush=True)
         for match in matches:
             mid = str(match.get("id"))
             minute = self._get_minute(match)
