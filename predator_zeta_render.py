@@ -1,45 +1,46 @@
 # =====================================================
 # PREDATOR ZETA v30.12 [PRO LEAGUES & TOP STRATEGIES]
 # =====================================================
-# Обновления и фиксы v30.12:
-# 1. 🛡️ ФИЛЬТР ТОПОК И БК-ЛИГ (PRO_LEAGUES_ONLY):
-#    Отсекаются не БК-доступные лиги. Остаются только профессиональные лиги.
-# 2. 🔥 3 ТОПОВЫЕ СТРАТЕГИИ:
-#    • LateFavoriteStrategy: Штурм фаворита (60'-78')
-#    • FirstHalfGoalStrategy: Гол в 1-м тайме (22'-36')
-#    • LateOverStrategy: Поздний тотал (70'-82')
-# 3. 🛡️ Улучшенный SofaFetcher (мульти-эндпоинт обход 403 / Cloudflare)
+# Мониторинг футбольных Live-матчей с отбором БК-доступных лиг
+# и автоматической рассылкой сигналов в Telegram!
 # =====================================================
 
-import time, os, sys, requests, threading
+import time
+import os
+import sys
+import threading
+import requests
+import asyncio
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, date
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# Вывод логов в терминал без задержек (Unbuffered output)
+# Вывод логов без задержек (Unbuffered output)
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(line_buffering=True)
 
 try:
     import cloudscraper
 except ImportError:
-    print("Установите: pip install cloudscraper requests", flush=True)
+    print("❌ Ошибка: Не установлена библиотека cloudscraper.", flush=True)
+    print("Установите через терминал: pip install cloudscraper requests aiohttp", flush=True)
     sys.exit(1)
 
 
 # =====================================================
-# ВЕБ-СЕРВЕР ДЛЯ RENDER HEALTH CHECK (PORT 10000)
+# 🌐 ДУММИ-СЕРВЕР ДЛЯ РЕНДЕРА (ЗЕЛЕНЫЙ СТАТУС В RENDER)
 # =====================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/html; charset=utf-8')
         self.end_headers()
-        self.wfile.write(b"PREDATOR ZETA BOT IS ALIVE!")
+        self.wfile.write(b"<h1>PREDATOR ZETA v30.12 Football Bot is LIVE!</h1>")
 
     def log_message(self, format, *args):
-        return
+        return  # Отключаем спам в консоли
+
 
 def start_dummy_server():
     port = int(os.environ.get("PORT", 10000))
@@ -50,25 +51,30 @@ def start_dummy_server():
 
 
 # =====================================================
-# КОНФИГ
+# ⚙️ КОНФИГУРАЦИЯ БОТА
 # =====================================================
 class Config:
     VERSION = "30.12 [PRO LEAGUES]"
-    CHECK_INTERVAL = 45             # 45 секунд между циклами
-    BANKROLL_START = 1000.0
-    FLAT_STAKE = 100.0
+    BOT_TOKEN = "7877159131:AAGrC_QlzSvKO1n_AFkJlMY7-UXTx_1l590"
+    CHAT_ID = "-1004290840012"
+    CHECK_INTERVAL = 60             # Проверка каждые 60 сек
+    BANKROLL_START = 1000
+    FLAT_STAKE = 100
     CURRENCY = "KZT"
 
     MAX_CONCURRENT_BETS = 8
-    DAILY_STOPLOSS_PCT = 30.0
-    OVERALL_STOPLOSS_PCT = 50.0
+    DAILY_STOPLOSS_PCT = 30
+    OVERALL_STOPLOSS_PCT = 50
 
+    # 🕐 Окна отправки сигналов (20-36' для 1-го тайма, 60-80' для 2-го тайма)
     SEND_WINDOWS = [(20, 36), (60, 80)]
     PENDING_EXPIRE_MINUTE = 82
 
-    PRO_LEAGUES_ONLY = True         # Включить фильтр только профессиональных БК-турниров
-    MIN_UNIQUE_USER_COUNT = 250     # Мин. подписчиков в SofaScore
+    # 🚫 ЖЁСТКИЙ ФИЛЬТР РЕГИОНАЛЬНЫХ И НЕПОНЯТНЫХ ЛИГ
+    PRO_LEAGUES_ONLY = True         # Только профессиональные БК-турниры
+    MIN_UNIQUE_USER_COUNT = 250     # Мин. количество подписчиков турнира в SofaScore
 
+    # Черный список слов (любительские лиги, юниоры, женские)
     EXCLUDE_KEYWORDS = [
         "astiller", "colonia", "provincial", "regional", "distrital", "interprovincial",
         "tercera", "preferente", "oberliga", "landesliga", "kreisliga", "bezirksliga",
@@ -99,6 +105,7 @@ def in_send_window(minute: int) -> bool:
 
 
 def is_excluded_match(match: dict) -> Optional[str]:
+    """Проверка турнира на БК-доступность и отсутствие любительских статусов."""
     tournament = match.get("tournament") or {}
     unique_t = tournament.get("uniqueTournament") or {}
     category = tournament.get("category") or {}
@@ -107,10 +114,10 @@ def is_excluded_match(match: dict) -> Optional[str]:
 
     if Config.PRO_LEAGUES_ONLY:
         if not unique_t:
-            return "No uniqueTournament"
+            return "No uniqueTournament (Региональная/Любительская лига)"
         user_count = int(unique_t.get("userCount") or 0)
         if user_count < Config.MIN_UNIQUE_USER_COUNT:
-            return f"Низкий статус (подписчиков: {user_count})"
+            return f"Низкий статус турнира (подписчиков: {user_count})"
 
     haystack = " ".join([
         str(tournament.get("name") or ""),
@@ -125,34 +132,6 @@ def is_excluded_match(match: dict) -> Optional[str]:
         if kw in haystack:
             return kw
     return None
-
-
-def load_credentials():
-    token = os.environ.get("BOT_TOKEN")
-    chat = os.environ.get("CHAT_ID")
-
-    if os.path.exists(".env") and (not token or not chat):
-        try:
-            for line in open(".env", encoding="utf-8"):
-                if "=" in line:
-                    k, _, v = line.strip().partition("=")
-                    v = v.strip().strip('"').strip("'")
-                    if k == "BOT_TOKEN" and not token: token = v
-                    if k == "CHAT_ID" and not chat:   chat = v
-        except Exception:
-            pass
-
-    if token and chat:
-        print("✅ Ключи Telegram успешно загружены", flush=True)
-        return token, chat
-
-    print("\n[!] Введите данные Telegram:", flush=True)
-    token = input("   BOT_TOKEN: ").strip().strip('"').strip("'")
-    chat = input("   CHAT_ID:   ").strip().strip('"').strip("'")
-
-    with open(".env", "w", encoding="utf-8") as f:
-        f.write(f"BOT_TOKEN={token}\nCHAT_ID={chat}\n")
-    return token, chat
 
 
 @dataclass
@@ -188,6 +167,7 @@ class BaseStrategy:
 
 
 def _extract_stat_val(stats: dict, target_names: List[str]) -> Tuple[int, int]:
+    """Вспомогательная функция для парсинга любых статистических показателей SofaScore."""
     if not stats:
         return (0, 0)
     try:
@@ -210,7 +190,7 @@ def _extract_stat_val(stats: dict, target_names: List[str]) -> Tuple[int, int]:
 
 
 # =====================================================
-# СТРАТЕГИИ
+# СТРАТЕГИЯ 1: 🔥 LATE FAVORITE PRESSURE (Штурм фаворита 60'-78')
 # =====================================================
 class LateFavoriteStrategy(BaseStrategy):
     id = "late_favorite"
@@ -224,7 +204,9 @@ class LateFavoriteStrategy(BaseStrategy):
 
         cur_h = int((match.get("homeScore") or {}).get("current") or 0)
         cur_a = int((match.get("awayScore") or {}).get("current") or 0)
-        if abs(cur_h - cur_a) > 1:
+        score_diff = abs(cur_h - cur_a)
+
+        if score_diff > 1:
             return None
 
         sh_h, sh_a = _extract_stat_val(stats, ["shots on target", "удары в створ"])
@@ -257,6 +239,9 @@ class LateFavoriteStrategy(BaseStrategy):
         return None
 
 
+# =====================================================
+# СТРАТЕГИЯ 2: ⚡ FIRST HALF GOAL STORM (Гол в 1-м тайме 22'-36')
+# =====================================================
 class FirstHalfGoalStrategy(BaseStrategy):
     id = "first_half_goal"
     name = "ГОЛ В 1-М ТАЙМЕ (22'-36')"
@@ -269,17 +254,22 @@ class FirstHalfGoalStrategy(BaseStrategy):
 
         cur_h = int((match.get("homeScore") or {}).get("current") or 0)
         cur_a = int((match.get("awayScore") or {}).get("current") or 0)
-        if (cur_h + cur_a) >= 2:
+        total_goals = cur_h + cur_a
+
+        if total_goals >= 2:
             return None
 
         sh_h, sh_a = _extract_stat_val(stats, ["shots on target", "удары в створ"])
         cn_h, cn_a = _extract_stat_val(stats, ["corner kicks", "corners", "угловые"])
 
-        if (sh_h + sh_a) >= 4 and (cn_h + cn_a) >= 3:
+        total_shots = sh_h + sh_a
+        total_corners = cn_h + cn_a
+
+        if total_shots >= 4 and total_corners >= 3:
             return {
                 "market": "first_half_goal",
                 "selection": "Гол в 1-м тайме (ИТБ 0.5 1st Half)",
-                "meta": {"total_shots": sh_h + sh_a, "total_corners": cn_h + cn_a},
+                "meta": {"total_shots": total_shots, "total_corners": total_corners},
             }
         return None
 
@@ -291,6 +281,9 @@ class FirstHalfGoalStrategy(BaseStrategy):
         return None
 
 
+# =====================================================
+# СТРАТЕГИЯ 3: 🎯 LATE TOTAL OVER (Поздний тотал 70'-82')
+# =====================================================
 class LateOverStrategy(BaseStrategy):
     id = "late_over"
     name = "ПОЗДНИЙ ТОТАЛ БОЛЬШЕ (70'-82')"
@@ -303,7 +296,9 @@ class LateOverStrategy(BaseStrategy):
 
         cur_h = int((match.get("homeScore") or {}).get("current") or 0)
         cur_a = int((match.get("awayScore") or {}).get("current") or 0)
-        if abs(cur_h - cur_a) > 1:
+        score_diff = abs(cur_h - cur_a)
+
+        if score_diff > 1:
             return None
 
         sh_h, sh_a = _extract_stat_val(stats, ["shots on target", "удары в створ"])
@@ -326,17 +321,25 @@ class LateOverStrategy(BaseStrategy):
         return None
 
 
-STRATEGIES: List[BaseStrategy] = [
-    LateFavoriteStrategy(),
-    FirstHalfGoalStrategy(),
-    LateOverStrategy(),
-]
+# Формируем список включенных стратегий
+STRATEGIES: List[BaseStrategy] = []
+STRATEGIES.append(LateFavoriteStrategy())
+STRATEGIES.append(FirstHalfGoalStrategy())
+STRATEGIES.append(LateOverStrategy())
+if not STRATEGIES:
+    STRATEGIES = [LateFavoriteStrategy(), FirstHalfGoalStrategy(), LateOverStrategy()]
 
 
 class BankrollManager:
     def __init__(self):
         self.balance = Config.BANKROLL_START
+        self.day_start_balance = Config.BANKROLL_START
+        self.current_day = date.today().isoformat()
+        self.history: List[dict] = []
         self.active_bets: Dict[str, ActiveBet] = {}
+        self.strategy_stats: Dict[str, dict] = {
+            s.id: {"wins": 0, "losses": 0, "profit": 0.0, "signals": 0} for s in STRATEGIES
+        }
 
     def can_open_new_bet(self) -> bool:
         return len(self.active_bets) < Config.MAX_CONCURRENT_BETS
@@ -354,12 +357,11 @@ class BankrollManager:
             entry_minute=info["minute"], meta=signal.get("meta", {}),
         )
         self.active_bets[match_id] = bet
+        if strategy.id in self.strategy_stats:
+            self.strategy_stats[strategy.id]["signals"] += 1
         return bet
 
 
-# =====================================================
-# ОБНОВЛЕННЫЙ SOFA FETCHER С РОТАЦИЕЙ И МУЛЬТИ-ЭНДПОИНТОМ
-# =====================================================
 class SofaFetcher:
     ENDPOINTS = [
         "https://www.sofascore.com/api/v1",
@@ -379,7 +381,10 @@ class SofaFetcher:
         ]
         b_config = browsers[try_count % len(browsers)]
         try:
-            self.sc = cloudscraper.create_scraper(browser=b_config, delay=3)
+            self.sc = cloudscraper.create_scraper(
+                browser=b_config,
+                delay=3
+            )
         except Exception:
             self.sc = requests.Session()
 
@@ -395,6 +400,7 @@ class SofaFetcher:
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
             "Referer": "https://www.sofascore.com/",
+            "Origin": "https://www.sofascore.com",
             "Sec-Ch-Ua": '"Chromium";v="124", "Not-A.Brand";v="99", "Google Chrome";v="124"',
             "Sec-Ch-Ua-Mobile": "?0" if not b_config.get("mobile") else "?1",
             "Sec-Ch-Ua-Platform": '"Windows"',
@@ -411,25 +417,28 @@ class SofaFetcher:
 
     def _get(self, ep):
         self._wait()
+        last_err = None
         for base_url in self.ENDPOINTS:
             try:
                 r = self.sc.get(f"{base_url}/{ep}", timeout=12)
                 if r.status_code == 200:
                     return r.json()
                 elif r.status_code in (403, 429):
+                    last_err = f"HTTP {r.status_code} (Cloudflare Block)"
                     self.fail_count += 1
                     self._init_scraper(self.fail_count)
                     time.sleep(2.0)
-            except Exception:
-                pass
+                else:
+                    last_err = f"HTTP {r.status_code}"
+            except Exception as e:
+                last_err = str(e)
+        if ep == "sport/football/events/live":
+            print(cl(f"⚠️ [SofaScore API Warning] Не удалось получить данные ({last_err}). Повтор...", "YE"), flush=True)
         return None
 
     def get_live_matches(self):
         res = self._get("sport/football/events/live")
         return res.get("events", []) if res else []
-
-    def get_match_details(self, mid):
-        return self._get(f"event/{mid}") or {}
 
     def get_match_incidents(self, mid) -> List[Dict]:
         res = self._get(f"event/{mid}/incidents")
@@ -460,7 +469,8 @@ class TelegramNotifier:
         resp = self._post("sendMessage", {
             "chat_id": self.chat_id, "parse_mode": "HTML",
             "text": (f"🤖 <b>PREDATOR ZETA v{Config.VERSION} ЗАПУЩЕН НА СЕРВЕРЕ!</b>\n"
-                     f"Только БК-доступные профессиональные лиги!\n"
+                     f"🟢 Сервер статус: <b>ONLINE</b>\n"
+                     f"💰 Ставка: {Config.FLAT_STAKE} {Config.CURRENCY}\n\n"
                      f"<b>Активные стратегии:</b>\n{strategies_txt}\n\n"
                      f"🔍 <i>Начинаю непрерывный сканинг Live-матчей...</i>")
         })
@@ -495,6 +505,7 @@ class LiveMonitor:
         self.bankroll = BankrollManager()
         self.tg = TelegramNotifier(token, chat_id)
         self.sent_signals: Dict[str, float] = {}
+        self.cycle = 0
 
     def _get_minute(self, match):
         code = (match.get("status") or {}).get("code", 0)
@@ -521,6 +532,7 @@ class LiveMonitor:
 
         while True:
             try:
+                self.cycle += 1
                 self._run_cycle()
                 time.sleep(Config.CHECK_INTERVAL)
             except KeyboardInterrupt:
@@ -533,18 +545,24 @@ class LiveMonitor:
     def _run_cycle(self):
         matches = self.fetcher.get_live_matches()
         if not matches:
-            print(cl(f"[{datetime.now().strftime('%H:%M:%S')}] 💤 Live матчей нет или временно заблокировано...", "YE"), flush=True)
+            print(cl(f"[{datetime.now().strftime('%H:%M:%S')}] 💤 В данный момент нет Live-матчей в SofaScore или временно заблокировано Cloudflare...", "YE"), flush=True)
             return
 
-        print(cl(f"[{datetime.now().strftime('%H:%M:%S')}] ⚡ Сканируем Live матчей: {len(matches)}", "CY"), flush=True)
+        valid_matches = []
+        filtered_count = 0
         for match in matches:
+            exclusion_reason = is_excluded_match(match)
+            if exclusion_reason:
+                filtered_count += 1
+            else:
+                valid_matches.append(match)
+
+        print(cl(f"[{datetime.now().strftime('%H:%M:%S')}] ⚡ Всего Live-матчей: {len(matches)} | В топ БК-лигах: {len(valid_matches)} | Отфильтровано: {filtered_count}", "CY"), flush=True)
+
+        for match in valid_matches:
             mid = str(match.get("id"))
             minute = self._get_minute(match)
             match["_minute"] = minute
-
-            exclusion_reason = is_excluded_match(match)
-            if exclusion_reason:
-                continue
 
             incidents = self.fetcher.get_match_incidents(mid)
             stats_data = self.fetcher.get_match_statistics(mid)
@@ -563,7 +581,7 @@ class LiveMonitor:
                         "minute": f"{minute}'"
                     }
                     if mid not in self.sent_signals:
-                        print(cl(f"🔥 [{strategy.name}] {league_name}: {home_name} vs {away_name} ({minute}')", "GR"), flush=True)
+                        print(cl(f"🔥 [{strategy.name}] {league_name}: {home_name} vs {away_name} ({minute}')", "GR"))
                         msg_id = self.tg.send_signal(strategy, info, signal, mid)
                         if msg_id:
                             self.bankroll.place_bet(mid, msg_id, strategy, signal, info)
@@ -571,5 +589,4 @@ class LiveMonitor:
 
 
 if __name__ == "__main__":
-    token, chat_id = load_credentials()
-    LiveMonitor(token, chat_id).run()
+    LiveMonitor(Config.BOT_TOKEN, Config.CHAT_ID).run()
